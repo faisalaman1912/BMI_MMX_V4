@@ -4,6 +4,7 @@ import streamlit as st
 import plotly.express as px
 import plotly.figure_factory as ff
 from pathlib import Path
+from io import StringIO
 
 # ------------------------------- #
 # Paths
@@ -147,9 +148,9 @@ if st.sidebar.button("Undo Last") and st.session_state.history:
 st.subheader("Exploration")
 
 with st.expander("Info"):
-    buf = []
-    df.info(buf=buf.append)
-    st.text("\n".join(buf))
+    buf = StringIO()
+    df.info(buf=buf)
+    st.text(buf.getvalue())
 
 with st.expander("Summary Stats"):
     st.write(df.describe(include="all"))
