@@ -1,78 +1,145 @@
-import streamlit as st
+import os
+import time
 import pandas as pd
 import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
+import streamlit as st
+import plotly.express as px
 
-# Page configuration
+# ------------------------------- #
+# Paths
+# ------------------------------- #
+BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+STORAGE_DIR = os.path.join(BASE_DIR, "storage")
+DATASETS_DIR = os.path.join(STORAGE_DIR, "datasets")
+
+os.makedirs(DATASETS_DIR, exist_ok=True)
+
+# ------------------------------- #
+# Helpers
+# ------------------------------- #
+def _list_datasets():
+    files = []
+    for fn in os.listdir(DATASETS_DIR):
+        full = os.path.join(DATASETS_DIR, fn)
+        if not os.path.isfile(full):
+            continue
+        ext = os.path.splitext(fn)[1].lower()
+        if ext not in (".csv", ".xlsx"):
+            continue
+        files.append({"name": fn, "path": full, "type": ext.strip(".")})
+    files.sort(key=lambda x: x["name"])
+    return files
+
+def _read_dataset(path: str, ext: str) -> pd.DataFrame:
+    if ext == "csv":
+        return pd.read_csv(path)
+    return pd.read_excel(path)
+
+def _save_dataset(df: pd.DataFrame, name: str):
+    out_path = os.path.join(DATASETS_DIR, name)
+    df.to_csv(out_path, index=False)
+    return out_path
+
+# ------------------------------- #
+# Streamlit UI
+# ------------------------------- #
 st.set_page_config(page_title="Data Exploration & Wrangling", layout="wide")
+st.title("🧹 Data Exploration & Wrangling")
 
-st.title("Data Exploration & Wrangling")
-st.write("""
-Use this section to inspect the raw data, clean it, engineer features, and visualize distributions and relationships.
-""")
+datasets = _list_datasets()
+if not datasets:
+    st.warning("No datasets available. Please upload data in **Ingestion & Curation Desk** first.")
+    st.stop()
 
-@st.cache_data
-def load_data(uploaded_file):
-    try:
-        df = pd.read_csv(uploaded_file)
-    except Exception:
-        df = pd.read_excel(uploaded_file)
-    return df
+sel_dataset = st.selectbox("Select dataset", options=[d["name"] for d in datasets])
+dataset = next(d for d in datasets if d["name"] == sel_dataset)
+df = _read_dataset(dataset["path"], dataset["type"])
 
-# Sidebar upload
-st.sidebar.header("Upload your dataset")
-uploaded_file = st.sidebar.file_uploader("Upload CSV/Excel", type=["csv", "xlsx"])
+st.subheader("📊 Dataset Preview")
+st.dataframe(df.head(20), use_container_width=True)
 
-if uploaded_file:
-    df = load_data(uploaded_file)
+# ------------------------------- #
+# Data Exploration
+# ------------------------------- #
+st.subheader("🔍 Data Exploration")
 
-    st.subheader("Raw Data Preview")
-    st.dataframe(df.head())
+with st.expander("Dataset Info"):
+    st.write("Shape:", df.shape)
+    st.write("Columns:", list(df.columns))
+    st.write("Data Types:")
+    st.write(df.dtypes)
 
-    # Summary
-    st.subheader("Data Summary")
-    buffer = df.describe(include='all', datetime_is_numeric=True).T
-    buffer["missing"] = df.isna().sum()
-    buffer["dtype"] = df.dtypes
-    st.write(buffer)
+with st.expander("Summary Statistics"):
+    st.dataframe(df.describe(include="all").T, use_container_width=True)
 
-    # Columns
-    st.subheader("Select Columns for Analysis")
-    numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
-    category_cols = df.select_dtypes(include='object').columns.tolist()
+with st.expander("Missing Values"):
+    missing = df.isnull().sum().reset_index()
+    missing.columns = ["Column", "Missing Count"]
+    missing["% Missing"] = 100 * missing["Missing Count"] / len(df)
+    st.dataframe(missing, use_container_width=True)
 
-    st.write("Numeric columns:", numeric_cols)
-    st.write("Categorical columns:", category_cols)
+    fig = px.bar(missing, x="Column", y="% Missing", title="Missing Value % by Column")
+    st.plotly_chart(fig, use_container_width=True)
 
-    selected_num = st.multiselect("Choose numeric columns to visualize", numeric_cols)
-    selected_cat = st.multiselect("Choose categorical columns to inspect", category_cols)
+# ------------------------------- #
+# Data Wrangling
+# ------------------------------- #
+st.subheader("🛠️ Data Wrangling")
 
-    # Numeric viz
-    if selected_num:
-        st.subheader("Numeric Features Distribution")
-        for col in selected_num:
-            fig, ax = plt.subplots()
-            sns.histplot(df[col].dropna(), kde=True, ax=ax)
-            ax.set_title(f"Distribution of {col}")
-            st.pyplot(fig, clear_figure=True)
+# Handle missing values
+col_missing = st.selectbox("Select column to handle missing values", options=df.columns)
+strategy = st.radio("Imputation Strategy", options=["Drop Rows", "Fill with Mean", "Fill with Median", "Fill with Mode", "Custom Value"])
+if strategy == "Custom Value":
+    custom_val = st.text_input("Enter custom value")
 
-        st.subheader("Scatter Plot")
-        if len(selected_num) >= 2:
-            c1, c2 = st.columns(2)
-            x_sel = c1.selectbox("X-axis", selected_num, key="scatter_x")
-            y_sel = c2.selectbox("Y-axis", selected_num, key="scatter_y")
+if st.button("Apply Missing Value Handling"):
+    if strategy == "Drop Rows":
+        df = df.dropna(subset=[col_missing])
+    elif strategy == "Fill with Mean":
+        if pd.api.types.is_numeric_dtype(df[col_missing]):
+            df[col_missing] = df[col_missing].fillna(df[col_missing].mean())
+    elif strategy == "Fill with Median":
+        if pd.api.types.is_numeric_dtype(df[col_missing]):
+            df[col_missing] = df[col_missing].fillna(df[col_missing].median())
+    elif strategy == "Fill with Mode":
+        df[col_missing] = df[col_missing].fillna(df[col_missing].mode()[0])
+    elif strategy == "Custom Value":
+        df[col_missing] = df[col_missing].fillna(custom_val)
 
-            fig, ax = plt.subplots()
-            sns.scatterplot(data=df, x=x_sel, y=y_sel, ax=ax)
-            ax.set_title(f"{x_sel} vs. {y_sel}")
-            st.pyplot(fig, clear_figure=True)
+    st.success(f"Applied {strategy} on {col_missing}")
 
-    # Categorical viz
-    if selected_cat:
-        st.subheader("Categorical Feature Counts")
-        for col in selected_cat:
-            fig, ax = plt.subplots()
-            df[col].value_counts().head(20).plot(kind='bar', ax=ax)
-            ax.set_title(f"Top 20 categories of {col}")
-            st.pyplot(fig, clear_figure=True)
+# Column operations
+st.subheader("🔧 Column Operations")
+col_ops = st.selectbox("Select operation", ["Rename Column", "Drop Column", "Create New Column"])
+if col_ops == "Rename Column":
+    col_to_rename = st.selectbox("Select column to rename", options=df.columns)
+    new_name = st.text_input("New column name")
+    if st.button("Rename Column"):
+        df = df.rename(columns={col_to_rename: new_name})
+        st.success(f"Renamed {col_to_rename} → {new_name}")
+
+elif col_ops == "Drop Column":
+    col_to_drop = st.multiselect("Select columns to drop", options=df.columns)
+    if st.button("Drop Selected Columns"):
+        df = df.drop(columns=col_to_drop)
+        st.success(f"Dropped {len(col_to_drop)} column(s)")
+
+elif col_ops == "Create New Column":
+    new_col_name = st.text_input("New column name")
+    formula = st.text_area("Enter a formula using pandas syntax (e.g., `df['A'] + df['B']`)")
+    if st.button("Create Column"):
+        try:
+            df[new_col_name] = eval(formula)
+            st.success(f"Created column {new_col_name}")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+# ------------------------------- #
+# Save Wrangled Dataset
+# ------------------------------- #
+st.subheader("💾 Save Processed Dataset")
+save_name = st.text_input("Enter filename to save (e.g., wrangled_data.csv)", value=f"wrangled_{sel_dataset}")
+if st.button("Save Dataset"):
+    path = _save_dataset(df, save_name)
+    st.success(f"Dataset saved at {path}")
+    st.write("Now available in **Ingestion & Curation Desk** and **Modeling**")
