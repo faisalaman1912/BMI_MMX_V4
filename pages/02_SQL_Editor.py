@@ -1,294 +1,417 @@
-# -*- coding: utf-8 -*-
-# 02_SQL_Editor.py — SAFE build for Py 3.13/Streamlit Cloud
-# Notes:
-# - Removes emoji in button labels (can break some terminals/parsers)
-# - Simplifies f-strings/escaping to avoid AST parse edge cases
-# - UTF-8 header added; keeps unicode in comments only
-# - Falls back to SQLite if DuckDB unavailable
-# - No optional deps required for core features; Excel download falls back gracefully
+# pages/02_SQL_Editor.py
+# -----------------------------------------------------------------------------
+# Streamlit page: SQL Editor
+# - Auto-discovers datasets (CSV/Parquet/XLSX) from a chosen "saved" folder
+# - Registers each dataset as a SQL table (DuckDB if available; fallback SQLite)
+# - Shows table catalog and column names
+# - SQL editor to query/join and create derived tables
+# - Save results to CSV/Parquet and download
+# -----------------------------------------------------------------------------
 
 import os
-import io
-import glob
 import re
-import time
-import sqlite3
+import io
+import json
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 
-# Try DuckDB; fallback to SQLite
+# Try DuckDB first; fallback to SQLite
+_ENGINE = "duckdb"
 try:
     import duckdb  # type: ignore
-    DUCKDB_AVAILABLE = True
 except Exception:
-    DUCKDB_AVAILABLE = False
+    import sqlite3  # type: ignore
+    _ENGINE = "sqlite3"
 
-# ---------------------------------
-# Config
-# ---------------------------------
 st.set_page_config(page_title="SQL Editor", layout="wide")
-DATA_DIR = st.secrets.get("DATA_DIR", "data/curated")
-DERIVED_DIR = st.secrets.get("DERIVED_DIR", "data/derived")
-os.makedirs(DATA_DIR, exist_ok=True)
-(os.path.isdir(DERIVED_DIR) and True) or os.makedirs(DERIVED_DIR, exist_ok=True)
 
-st.sidebar.title("SQL Editor")
-st.sidebar.caption("Auto-registers CSV/Parquet/Feather from data folder as tables.")
+# ------------------------------- Utilities ---------------------------------- #
 
-# ---------------------------------
-# Utilities
-# ---------------------------------
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
 
-def _duck_ident(name: str) -> str:
-    # Quote if needed using double-quotes
-    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
-        return name
-    return '"' + name.replace('"', '""') + '"'
-
-
-def _sqlite_ident(name: str) -> str:
-    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
-        return name
-    return '"' + name.replace('"', '""') + '"'
-
-
-def _read_df(path: str) -> pd.DataFrame:
-    ext = os.path.splitext(path)[1].lower()
-    if ext == ".csv":
-        return pd.read_csv(path)
-    if ext in (".parquet", ".pq"):
-        return pd.read_parquet(path)
-    if ext in (".feather", ".ft"):
-        return pd.read_feather(path)
-    return pd.read_csv(path)
-
-
-def _scan_dir(root: str) -> Dict[str, str]:
-    pats = ["*.csv", "*.parquet", "*.pq", "*.feather", "*.ft"]
-    files: List[str] = []
-    for p in pats:
-        files.extend(glob.glob(os.path.join(root, p)))
-    mapping: Dict[str, str] = {}
-    for f in sorted(files, key=lambda x: os.path.getmtime(x)):
-        mapping[os.path.splitext(os.path.basename(f))[0]] = f
-    return mapping
-
-# ---------------------------------
-# Engine wrapper
-# ---------------------------------
-class SQLEngine:
-    def __init__(self, prefer_duckdb: bool = True):
-        if prefer_duckdb and DUCKDB_AVAILABLE:
-            self.kind = "duckdb"
-            self.engine = duckdb.connect(database=":memory:")
-            self.engine.execute("PRAGMA threads=4;")
-        else:
-            self.kind = "sqlite"
-            self.engine = sqlite3.connect(":memory:")
-
-    def register_file(self, tbl: str, path: str) -> None:
-        ext = os.path.splitext(path)[1].lower()
-        if self.kind == "duckdb":
-            t = _duck_ident(tbl)
-            p = path.replace("'", "''")
-            if ext == ".csv":
-                self.engine.execute("CREATE OR REPLACE VIEW %s AS SELECT * FROM read_csv_auto('%s');" % (t, p))
-            elif ext in (".parquet", ".pq"):
-                self.engine.execute("CREATE OR REPLACE VIEW %s AS SELECT * FROM parquet_scan('%s');" % (t, p))
-            elif ext in (".feather", ".ft"):
-                self.engine.execute("CREATE OR REPLACE VIEW %s AS SELECT * FROM read_ipc('%s');" % (t, p))
-            else:
-                df = _read_df(path)
-                self.register_df(tbl, df)
-        else:
-            df = _read_df(path)
-            self.register_df(tbl, df)
-
-    def register_df(self, tbl: str, df: pd.DataFrame) -> None:
-        if self.kind == "duckdb":
-            self.engine.register(tbl, df)
-            self.engine.execute("CREATE OR REPLACE VIEW %s AS SELECT * FROM %s;" % (_duck_ident(tbl), _duck_ident(tbl)))
-        else:
-            df.to_sql(tbl, self.engine, if_exists="replace", index=False)
-
-    def list_tables(self) -> List[str]:
-        if self.kind == "duckdb":
-            q = (
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema IN ('main') ORDER BY table_name"
-            )
-            return [r[0] for r in self.engine.execute(q).fetchall()]
-        q = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"
-        return [r[0] for r in self.engine.execute(q).fetchall()]
-
-    def columns(self, tbl: str) -> List[Tuple[str, Optional[str]]]:
-        if self.kind == "duckdb":
-            q = "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '%s' ORDER BY ordinal_position;" % (tbl.replace("'", "''"),)
-            return [(r[0], r[1]) for r in self.engine.execute(q).fetchall()]
-        q = "PRAGMA table_info(%s);" % _sqlite_ident(tbl)
-        return [(r[1], r[2]) for r in self.engine.execute(q).fetchall()]
-
-    def query(self, sql: str) -> pd.DataFrame:
-        if self.kind == "duckdb":
-            return self.engine.execute(sql).df()
-        return pd.read_sql_query(sql, self.engine)
-
-# ---------------------------------
-# Cacheable helpers
-# ---------------------------------
-@st.cache_data(show_spinner=False)
-def _cached_scan(root: str) -> Dict[str, str]:
-    return _scan_dir(root)
-
-
-def _load_all(engine: SQLEngine, root: str) -> Dict[str, str]:
-    mp = _cached_scan(root)
-    for t, p in mp.items():
-        engine.register_file(t, p)
-    return mp
+def find_base_dir_candidates() -> List[str]:
+    env_path = os.environ.get("SAVED_DATA_DIR", "").strip()
+    cands = []
+    if env_path:
+        cands.append(env_path)
+    cands.extend([
+        "./saved_datasets",
+        "./data/curated",
+        "./data/saved",
+        "./datasets",
+        "./data",
+    ])
+    return cands
 
 @st.cache_data(show_spinner=False)
-def _snapshot_schema(_kind: str, _bust: int) -> Dict[str, List[Tuple[str, Optional[str]]]]:
-    eng: SQLEngine = st.session_state["_engine"]
-    out: Dict[str, List[Tuple[str, Optional[str]]]] = {}
-    for t in eng.list_tables():
-        out[t] = eng.columns(t)
+def list_dataset_files(folder: str, include_subfolders: bool = True) -> List[str]:
+    """Return dataset file paths (csv / parquet / xlsx)."""
+    if not os.path.isdir(folder):
+        return []
+    exts = (".csv", ".parquet", ".xlsx")
+    out = []
+    if include_subfolders:
+        for root, _dirs, files in os.walk(folder):
+            for f in files:
+                if f.lower().endswith(exts):
+                    out.append(os.path.join(root, f))
+    else:
+        for f in os.listdir(folder):
+            if f.lower().endswith(exts):
+                out.append(os.path.join(folder, f))
+    out.sort()
     return out
 
-# ---------------------------------
-# UI
-# ---------------------------------
-if "_engine" not in st.session_state:
-    st.session_state["_engine"] = SQLEngine(prefer_duckdb=True)
-    st.session_state["_bust"] = 0
+def _safe_table_name(path: str) -> str:
+    """Create a SQL-safe table name from filename."""
+    base = os.path.splitext(os.path.basename(path))[0]
+    # Replace non-alnum with underscores, and ensure it starts with a letter
+    name = re.sub(r"[^A-Za-z0-9_]", "_", base)
+    if not re.match(r"^[A-Za-z_]", name):
+        name = "t_" + name
+    return name.lower()
 
-engine: SQLEngine = st.session_state["_engine"]
-_files = _load_all(engine, DATA_DIR)
-schema = _snapshot_schema(engine.kind, st.session_state["_bust"])  # table -> cols
+@st.cache_data(show_spinner=False)
+def peek_columns_from_file(path: str, sheet: Optional[str] = None, max_rows: int = 2000) -> List[str]:
+    """Read a small chunk just to infer column names robustly."""
+    low = path.lower()
+    try:
+        if low.endswith(".csv"):
+            df = pd.read_csv(path, nrows=max_rows)
+        elif low.endswith(".parquet"):
+            df = pd.read_parquet(path)
+        elif low.endswith(".xlsx"):
+            df = pd.read_excel(path, sheet_name=sheet, nrows=max_rows)
+        else:
+            return []
+        return list(df.columns)
+    except Exception:
+        return []
 
-# Sidebar tables
-st.sidebar.subheader("Available Tables")
-flt = st.sidebar.text_input("Filter tables", "")
-names = sorted(schema.keys())
-if flt:
-    names = [n for n in names if flt.lower() in n.lower()]
-with st.sidebar.container(height=280):
-    for nm in names:
-        with st.sidebar.expander(nm, expanded=False):
-            cols = schema[nm]
-            st.caption("%d columns" % len(cols))
-            for c, t in cols:
-                st.code("%s.%s (%s)" % (nm, c, t), language="text")
-            st.button("Copy SELECT *", key="copy_%s" % nm, on_click=lambda s="SELECT * FROM %s LIMIT 100;" % nm: st.session_state.__setitem__("sql_in", s))
+@st.cache_data(show_spinner=False)
+def excel_sheet_names(path: str) -> List[str]:
+    try:
+        xls = pd.ExcelFile(path)
+        return xls.sheet_names
+    except Exception:
+        return []
 
-st.markdown("## SQL Editor")
-placeholder = (
-    "-- Tips:\n"
-    "-- 1) Use the sidebar to inspect schemas.\n"
-    "-- 2) Click 'Copy SELECT *' to insert a template.\n"
-    "-- 3) Engine: %s | Data dir: %s\n\n"
-    "-- Example:\n"
-    "-- SELECT a.col1, b.col2\n"
-    "-- FROM table_a a\n"
-    "-- JOIN table_b b ON a.id = b.id\n"
-    "-- WHERE a.date >= '2025-01-01'\n"
-    "-- LIMIT 100;\n" % (engine.kind.upper(), DATA_DIR)
+def read_full_dataframe(path: str, sheet: Optional[str]) -> pd.DataFrame:
+    low = path.lower()
+    if low.endswith(".csv"):
+        return pd.read_csv(path)
+    elif low.endswith(".parquet"):
+        # Parquet requires pyarrow or fastparquet; if not present, show a clear error
+        try:
+            return pd.read_parquet(path)
+        except Exception as e:
+            st.error(f"Failed to read Parquet: {e}")
+            raise
+    elif low.endswith(".xlsx"):
+        return pd.read_excel(path, sheet_name=sheet)
+    else:
+        raise ValueError("Unsupported file: " + path)
+
+def register_tables_from_files(
+    files: List[str],
+    excel_sheet_choice: Dict[str, Optional[str]],
+) -> Tuple[Dict[str, pd.DataFrame], Dict[str, str]]:
+    """
+    Load all datasets to pandas DataFrames and return:
+    - table_name -> DataFrame
+    - table_name -> source path
+    """
+    table_dfs: Dict[str, pd.DataFrame] = {}
+    table_src: Dict[str, str] = {}
+
+    name_counts: Dict[str, int] = {}
+    for p in files:
+        tname = _safe_table_name(p)
+        # disambiguate duplicates
+        cnt = name_counts.get(tname, 0)
+        name_counts[tname] = cnt + 1
+        if cnt > 0:
+            tname = f"{tname}_{cnt+1}"
+
+        sheet = excel_sheet_choice.get(p)
+        df = read_full_dataframe(p, sheet=sheet)
+        table_dfs[tname] = df
+        table_src[tname] = p
+
+    return table_dfs, table_src
+
+def run_sql_duckdb(query: str, tables: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    con = duckdb.connect()
+    try:
+        # Register all DataFrames as DuckDB views
+        for name, df in tables.items():
+            con.register(name, df)
+        return con.execute(query).df()
+    finally:
+        con.close()
+
+def run_sql_sqlite(query: str, tables: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    # In-memory DB
+    con = sqlite3.connect(":memory:")
+    try:
+        for name, df in tables.items():
+            # Best-effort dtype handling; SQLite will coerce flexibly
+            df.to_sql(name, con, index=False, if_exists="replace")
+        return pd.read_sql_query(query, con)
+    finally:
+        con.close()
+
+def run_sql(query: str, tables: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    if _ENGINE == "duckdb":
+        return run_sql_duckdb(query, tables)
+    else:
+        return run_sql_sqlite(query, tables)
+
+def suggest_select_star(table: str, limit: int = 100) -> str:
+    return f"SELECT * FROM {table} LIMIT {limit};"
+
+def suggest_join_example(left: str, right: str, key: Optional[str] = None) -> str:
+    k = key or "id"
+    return f"""SELECT l.*, r.*
+FROM {left} l
+LEFT JOIN {right} r
+  ON l.{k} = r.{k}
+LIMIT 100;"""
+
+# ------------------------------- UI: Header --------------------------------- #
+
+st.title("SQL Editor")
+st.caption(
+    ("Engine: **DuckDB**" if _ENGINE == "duckdb" else "Engine: **SQLite (fallback)**")
+    + " · Query CSV/Parquet/Excel files as tables. Joins supported."
 )
 
-sql_text = st.text_area("Write your SQL query", key="sql_in", height=200, placeholder=placeholder)
+# ------------------------------- Sidebar: Data ------------------------------- #
 
-# Lightweight suggestions
-if sql_text:
-    try:
-        last_tok = re.split(r"[^A-Za-z0-9_\.]", sql_text.strip())[-1]
-    except Exception:
-        last_tok = ""
-    sugg: List[str] = []
-    if last_tok:
-        for tname in schema.keys():
-            if tname.lower().startswith(last_tok.lower()):
-                sugg.append(tname)
-        for tname, cols in schema.items():
-            for c, _ in cols:
-                if c.lower().startswith(last_tok.lower()) and c not in sugg:
-                    sugg.append(c)
-                full = tname + "." + c
-                if full.lower().startswith(last_tok.lower()) and full not in sugg:
-                    sugg.append(full)
-    if sugg:
-        st.caption("Suggestions (click to insert):")
-        n = min(4, len(sugg))
-        cs = st.columns(n)
-        for i, s in enumerate(sugg[:20]):
-            if cs[i % n].button(s, key="sug_%d" % i):
-                st.session_state["sql_in"] = (sql_text + (" " if not sql_text.endswith(" ") else "") + s)
-                st.rerun()
+st.sidebar.header("Datasets")
 
-col_run, col_save, col_ref = st.columns([1, 1, 1])
-run_clicked = col_run.button("Run Query")
-save_name = col_save.text_input("Save result as (table)", key="_save_name", placeholder="my_new_dataset")
-if col_ref.button("Refresh Tables"):
-    st.cache_data.clear()
-    st.session_state["_bust"] += 1
-    st.rerun()
+# Select base folder
+default_base_dir = None
+for c in find_base_dir_candidates():
+    if os.path.isdir(c):
+        default_base_dir = c
+        break
+if default_base_dir is None:
+    default_base_dir = "./saved_datasets"
+    ensure_dir(default_base_dir)
 
-result_df: Optional[pd.DataFrame] = None
-if run_clicked and sql_text and sql_text.strip():
-    t0 = time.time()
-    try:
-        result_df = engine.query(sql_text)
-        st.success("Query OK in %.2fs — %s rows" % (time.time() - t0, format(len(result_df), ",")))
-    except Exception as e:
-        st.error("Query failed. See details below.")
-        with st.expander("Error details", expanded=False):
-            st.code(str(e), language="text")
+base_dir = st.sidebar.text_input(
+    "Saved data root folder",
+    value=default_base_dir,
+    help="Root folder that contains your saved/curated datasets.",
+)
 
-if isinstance(result_df, pd.DataFrame):
-    st.dataframe(result_df, use_container_width=True, height=420)
+include_subfolders = st.sidebar.checkbox("Include subfolders", value=True)
 
-    with st.expander("Download Result"):
-        # CSV
-        st.download_button("Download CSV", data=result_df.to_csv(index=False).encode("utf-8"), file_name="query_result.csv", mime="text/csv")
-        # Excel (best-effort)
+files = list_dataset_files(base_dir, include_subfolders=include_subfolders)
+if not files:
+    st.warning(
+        f"No datasets found in: `{os.path.relpath(base_dir)}`. "
+        "Place **CSV, Parquet, or Excel (.xlsx)** files here "
+        f"{'(including subfolders)' if include_subfolders else ''}."
+    )
+    st.stop()
+
+# Optional: per-Excel sheet picker (only shown for .xlsx)
+st.sidebar.subheader("Excel Sheets")
+excel_sheet_choice: Dict[str, Optional[str]] = {}
+for p in files:
+    if p.lower().endswith(".xlsx"):
+        sheets = excel_sheet_names(p)
+        if len(sheets) > 1:
+            excel_sheet_choice[p] = st.sidebar.selectbox(
+                f"Sheet for {os.path.basename(p)}",
+                options=sheets,
+                index=0,
+                key=f"sheet::{p}",
+            )
+        else:
+            excel_sheet_choice[p] = sheets[0] if sheets else None
+    else:
+        excel_sheet_choice[p] = None
+
+# Load dataframes and register table mapping
+with st.spinner("Loading datasets..."):
+    tables_df, tables_src = register_tables_from_files(files, excel_sheet_choice)
+
+# --------------------------- Catalog & Columns Pane -------------------------- #
+
+left, right = st.columns([1, 2])
+
+with left:
+    st.subheader("Tables")
+    table_names = sorted(tables_df.keys())
+    st.dataframe(
+        pd.DataFrame({
+            "table": table_names,
+            "rows": [len(tables_df[t]) for t in table_names],
+            "cols": [len(tables_df[t].columns) for t in table_names],
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("**Select a table to view columns**")
+    selected_table = st.selectbox(
+        "Table",
+        options=["(choose)"] + table_names,
+        index=0,
+        key="table_select",
+    )
+
+    if selected_table != "(choose)":
+        cols = list(tables_df[selected_table].columns)
+        st.markdown(f"**Columns in `{selected_table}`** ({len(cols)}):")
+        st.code(", ".join(cols), language="text")
+
+        # Quick paste snippets
+        st.markdown("**Quick SQL snippets**")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("SELECT *", key="btn_select_star"):
+                st.session_state["sql"] = suggest_select_star(selected_table)
+        with c2:
+            # Try to show a join suggestion if there is another table
+            other = [t for t in table_names if t != selected_table]
+            if other and st.button("JOIN example", key="btn_join_example"):
+                st.session_state["sql"] = suggest_join_example(selected_table, other[0])
+
+with right:
+    st.subheader("SQL Editor")
+    default_sql = st.session_state.get("sql") or (
+        "/* Example\n"
+        f"{suggest_select_star(table_names[0])}\n"
+        "*/"
+    )
+    sql = st.text_area(
+        "Write SQL here",
+        value=default_sql,
+        height=220,
+        key="sql",
+        help=(
+            "Use table names shown on the left. "
+            "DuckDB syntax preferred; SQLite fallback supports most basics."
+        ),
+    )
+
+    run = st.button("Run Query", type="primary")
+    if run:
         try:
-            xbuf = io.BytesIO()
-            with pd.ExcelWriter(xbuf, engine="xlsxwriter") as writer:
-                result_df.to_excel(writer, index=False, sheet_name="Result")
-            st.download_button("Download Excel", data=xbuf.getvalue(), file_name="query_result.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        except Exception as _ex:
-            st.info("Excel export not available (missing dependency). CSV download still works.")
+            with st.spinner("Running query..."):
+                df_out = run_sql(sql, tables_df)
 
-    if save_name:
-        safe = re.sub(r"[^A-Za-z0-9_]+", "_", save_name.strip())
-        if st.button("Save as Dataset"):
-            try:
-                engine.register_df(safe, result_df)
-                out_parquet = os.path.join(DERIVED_DIR, safe + ".parquet")
-                out_csv = os.path.join(DERIVED_DIR, safe + ".csv")
+            st.success(f"Query returned {len(df_out):,} rows × {len(df_out.columns)} columns")
+            st.dataframe(df_out.head(1000), use_container_width=True)
+
+            # -------------------- Save / Download -------------------- #
+            st.markdown("---")
+            st.subheader("Save or Download Result")
+
+            base_name = f"sql_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            out_name = st.text_input("Base filename (no extension)", value=base_name)
+
+            # Save to selected folder
+            target_folder = st.text_input(
+                "Save to folder",
+                value=os.path.dirname(files[0]) if files else base_dir,
+                help="Choose any existing folder. Files saved as both CSV & Parquet."
+            )
+            ensure_dir(target_folder)
+
+            # Save buttons
+            c1, c2, c3 = st.columns([1,1,1])
+            with c1:
+                if st.button("Save to CSV"):
+                    csv_path = os.path.join(target_folder, out_name + ".csv")
+                    df_out.to_csv(csv_path, index=False)
+                    st.success(f"Saved CSV → `{os.path.relpath(csv_path)}`")
+
+            with c2:
+                # Parquet save (if pyarrow/fastparquet available)
                 try:
-                    result_df.to_parquet(out_parquet, index=False)
+                    import pyarrow  # noqa: F401
+                    parquet_ok = True
                 except Exception:
-                    pass
-                result_df.to_csv(out_csv, index=False)
-                st.cache_data.clear()
-                st.session_state["_bust"] += 1
-                st.success("Saved as '%s' in %s (CSV% sParquet) and registered in the engine." % (safe, DERIVED_DIR, ", " if os.path.exists(out_parquet) else " without "))
-            except Exception as e:
-                st.error("Save failed: %s" % str(e))
+                    parquet_ok = False
 
-with st.expander("Help / Troubleshooting"):
+                if st.button("Save to Parquet"):
+                    if parquet_ok:
+                        pq_path = os.path.join(target_folder, out_name + ".parquet")
+                        df_out.to_parquet(pq_path, index=False)
+                        st.success(f"Saved Parquet → `{os.path.relpath(pq_path)}`")
+                    else:
+                        st.error("Parquet requires `pyarrow` or `fastparquet` installed.")
+
+            with c3:
+                # On-the-fly downloads (no disk write)
+                csv_bytes = df_out.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "Download CSV",
+                    data=csv_bytes,
+                    file_name=out_name + ".csv",
+                    mime="text/csv",
+                )
+
+                # Excel download (no dependency beyond pandas openpyxl if present)
+                buf = io.BytesIO()
+                try:
+                    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+                        df_out.to_excel(writer, sheet_name="result", index=False)
+                    st.download_button(
+                        "Download Excel",
+                        data=buf.getvalue(),
+                        file_name=out_name + ".xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                except Exception:
+                    # Fallback to CSV only if Excel writer unavailable
+                    pass
+
+            # Optional: update manifest in folder to help other pages discover this result
+            try:
+                manifest_path = os.path.join(target_folder, "datasets_index.json")
+                if os.path.exists(manifest_path):
+                    with open(manifest_path, "r", encoding="utf-8") as f:
+                        manifest = json.load(f)
+                else:
+                    manifest = {"datasets": []}
+                manifest["datasets"].append({
+                    "name": out_name,
+                    "path_csv": os.path.join(target_folder, out_name + ".csv"),
+                    "path_parquet": os.path.join(target_folder, out_name + ".parquet"),
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
+                    "source": "SQL_Editor",
+                    "module": "SQL_Editor",
+                })
+                with open(manifest_path, "w", encoding="utf-8") as f:
+                    json.dump(manifest, f, indent=2)
+                st.caption(f"Manifest updated: `{os.path.relpath(manifest_path)}`")
+            except Exception:
+                pass
+
+        except Exception as e:
+            st.error(f"Query failed: {e}")
+
+# ----------------------- Helpful Hints & Quick Help -------------------------- #
+
+with st.expander("Tips", expanded=False):
     st.markdown(
         """
-**Engine**: DuckDB (if installed) else SQLite  
-**Data folder**: `data/curated` (override via `st.secrets["DATA_DIR"]`)  
-**Derived folder**: `data/derived` (override via `st.secrets["DERIVED_DIR"]`)
-
-Tips
-- If you saw `ModuleNotFoundError: duckdb`, the app automatically uses SQLite.
-- Supported auto-registered types: CSV, Parquet, Feather (Parquet/Feather need pyarrow).
-- Click **Refresh Tables** after adding/removing files in the data folders.
-- Saved datasets land in `data/derived` and are registered in-memory for immediate querying.
+- **Tables = Files**: Every CSV/Parquet/Excel becomes a table (name = filename, normalized).
+- **Excel**: If a workbook has multiple sheets, pick the one you want in the sidebar.
+- **DuckDB vs SQLite**:
+  - DuckDB (preferred): better SQL features, Parquet native support, fast joins.
+  - SQLite (fallback): widely available; works well for CSV/XLSX.
+- **Snippets**: Use the buttons on the left to paste a `SELECT *` or a sample `JOIN`.
+- **Save**: You can save results to disk (CSV/Parquet) or download (CSV/Excel).
         """
     )
