@@ -23,8 +23,11 @@ except Exception:
 st.set_page_config(page_title="Ingestion & Curation Desk", layout="wide")
 st.title("📥 Ingestion & Curation Desk")
 
-DATA_DIR = "data"
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# CHANGED: Standardize the curated data folder here
+DATA_DIR = os.environ.get("SAVED_DATA_DIR", "data/curated")
 os.makedirs(DATA_DIR, exist_ok=True)
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 # Session state
 st.session_state.setdefault("_uploaded_hashes", set())   # prevent duplicate writes within session
@@ -173,7 +176,7 @@ def _save_new_dataset(df: pd.DataFrame, base_name: str, to_xlsx: bool) -> str:
     return dest
 
 # ---------------- Upload ----------------
-st.subheader("Upload files (CSV/XLSX)")
+st.subheader(f"Upload files to `{DATA_DIR}` (CSV/XLSX)")
 
 uploads = st.file_uploader(
     "Choose one or more files",
@@ -213,7 +216,7 @@ if save_uploads and uploads:
         except Exception as e:
             st.error(f"Failed to save {uf.name}: {e}")
     if saved:
-        st.success(f"Uploaded {saved} file(s).")
+        st.success(f"Uploaded {saved} file(s) to `{DATA_DIR}`.")
 
 st.divider()
 
@@ -222,14 +225,14 @@ st.subheader("Saved files")
 
 files = _list_files()
 if not files:
-    st.info("No files found yet. Upload and click 'Save uploaded files'.")
+    st.info(f"No files found yet in `{DATA_DIR}`. Upload and click 'Save uploaded files'.")
 else:
     # --- Delete ALL controls ---
     if st.button("Delete ALL files", type="secondary"):
         st.session_state["_delete_all_armed"] = True
 
     if st.session_state["_delete_all_armed"]:
-        st.warning("Type **DELETE ALL** to confirm deletion of every file in the data/ folder.")
+        st.warning(f"Type **DELETE ALL** to confirm deletion of every file in the `{DATA_DIR}` folder.")
         confirm = st.text_input("Confirmation text", key="__confirm_delete_all")
         cc1, cc2 = st.columns(2)
         with cc1:
@@ -262,7 +265,7 @@ else:
             "name": f["name"],
             "type": f["type"],
             "size": f["size"],
-            "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(f["modified_ts"])),
+            "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(f["modified_ts"]))),
             "rows": "" if rows is None else f"{rows:,}",
             "cols": "" if cols is None else f"{cols:,}",
             "path": f["path"],
@@ -394,5 +397,6 @@ else:
 
                     saved_path = _save_new_dataset(out, new_base, to_xlsx=(fmt == "xlsx"))
                     st.success(f"Saved new dataset: {os.path.basename(saved_path)}")
+                    st.caption(f"Location: `{saved_path}`")
                 except Exception as e:
                     st.error(f"Failed to save new dataset: {e}")
