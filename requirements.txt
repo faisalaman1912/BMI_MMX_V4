@@ -6,3 +6,4 @@ pyarrow
 numpy>=1.23
 scikit-learn>=1.3
 scipy>=1.10
+plotly>=5.22.0
