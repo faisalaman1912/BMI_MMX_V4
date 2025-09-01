@@ -18,14 +18,15 @@ except ImportError:
 # Page config
 # ----------------------
 st.set_page_config(page_title="Modeling", layout="wide")
-
 st.title("📊 Modeling")
 
 # ----------------------
 # Storage setup
 # ----------------------
 STORAGE_DIR = "storage/models"
+CURATED_DIR = "data/curated"
 os.makedirs(STORAGE_DIR, exist_ok=True)
+os.makedirs(CURATED_DIR, exist_ok=True)
 
 # ----------------------
 # Session state init
@@ -37,15 +38,42 @@ if "model_queue" not in st.session_state:
 # Dataset selection
 # ----------------------
 st.subheader("Step 1: Select Dataset")
-uploaded_file = st.file_uploader("Upload a CSV dataset", type="csv")
 
-if uploaded_file:
-    df = pd.read_csv(uploaded_file)
+# List curated files
+curated_files = [f for f in os.listdir(CURATED_DIR) if f.endswith(".csv")]
+
+dataset_choice = st.radio(
+    "Choose dataset source",
+    ["Select from curated folder", "Upload new CSV"]
+)
+
+df = None
+selected_file = None
+
+if dataset_choice == "Select from curated folder":
+    if curated_files:
+        selected_file = st.selectbox("Available curated datasets", curated_files)
+        if selected_file:
+            df = pd.read_csv(os.path.join(CURATED_DIR, selected_file))
+            st.success(f"Loaded curated file: {selected_file}")
+    else:
+        st.warning("No curated datasets found. Please upload one.")
+
+elif dataset_choice == "Upload new CSV":
+    uploaded_file = st.file_uploader("Upload a CSV dataset", type="csv")
+    if uploaded_file:
+        selected_file = uploaded_file.name
+        save_path = os.path.join(CURATED_DIR, selected_file)
+        df = pd.read_csv(uploaded_file)
+        df.to_csv(save_path, index=False)  # save in curated folder
+        st.success(f"Uploaded and saved to curated folder: {save_path}")
+
+# ----------------------
+# Target + features
+# ----------------------
+if df is not None:
     st.dataframe(df.head())
 
-    # ----------------------
-    # Target + features
-    # ----------------------
     st.subheader("Step 2: Define Model")
 
     target = st.selectbox("Target variable", df.columns)
@@ -70,7 +98,7 @@ if uploaded_file:
             st.error("SciPy is required for NNLS. Please install scipy >= 1.10.")
         else:
             spec = {
-                "dataset": uploaded_file.name,
+                "dataset": selected_file,
                 "target": target,
                 "target_lag": target_lag,
                 "name": model_name,
@@ -101,6 +129,10 @@ if st.session_state.model_queue:
             timestamp = int(time.time())
             run_dir = os.path.join(STORAGE_DIR, f"{timestamp}_{spec['name']}")
             os.makedirs(run_dir, exist_ok=True)
+
+            # Load dataset from curated folder
+            file_path = os.path.join(CURATED_DIR, spec["dataset"])
+            df = pd.read_csv(file_path)
 
             # Prepare data
             X = df[spec["features"]].copy()
