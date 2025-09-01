@@ -258,18 +258,19 @@ else:
                 st.session_state["_delete_all_armed"] = False
 
     # Build metadata with rows/cols
-    meta_rows: List[Dict[str, str]] = []
-    for f in files:
-        rows, cols = _quick_shape(f["path"], os.path.splitext(f["name"])[1].lower())
-        meta_rows.append({
-            "name": f["name"],
-            "type": f["type"],
-            "size": f["size"],
-            "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(f["modified_ts"]))),
-            "rows": "" if rows is None else f"{rows:,}",
-            "cols": "" if cols is None else f"{cols:,}",
-            "path": f["path"],
-        })
+meta_rows: List[Dict[str, str]] = []
+for f in files:
+    rows, cols = _quick_shape(f["path"], os.path.splitext(f["name"])[1].lower())
+    meta_rows.append({
+        "name": f["name"],
+        "type": f["type"],
+        "size": f["size"],
+        "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(f["modified_ts"])),
+        "rows": "" if rows is None else f"{rows:,}",
+        "cols": "" if cols is None else f"{cols:,}",
+        "path": f["path"],
+    })
+
 
     # Header
     h1, h2, h3, h4, h5, h6, h7 = st.columns([3, 1, 1, 2, 1, 1, 1])
