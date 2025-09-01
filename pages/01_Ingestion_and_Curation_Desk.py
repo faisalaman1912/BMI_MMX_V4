@@ -1,7 +1,7 @@
-# pages/1_Data_Upload.py
-# Data Upload & File Analyzer (no loops) + prominent Delete ALL
+# pages/01_Ingestion_and_Curation_Desk.py
+# Data Upload & File Analyzer (no loops) + Delete ALL
 # - Upload CSV/XLSX, Save uploaded files, Refresh files list
-# - Scrollable file inventory with per-file Delete + Delete ALL (guarded, now at top of section)
+# - Scrollable file inventory with per-file Delete + Delete ALL (guarded)
 # - Analyzer: preview top 100 (10 visible), column summary, per-column impute (Mean/Median/Mode), save new file
 
 import os
@@ -20,8 +20,8 @@ try:
 except Exception:
     HAVE_OPENPYXL = False
 
-st.set_page_config(page_title="Data Upload & Analyzer", layout="wide")
-st.title("Data Upload & Analyzer")
+st.set_page_config(page_title="Ingestion & Curation Desk", layout="wide")
+st.title("📥 Ingestion & Curation Desk")
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -115,7 +115,6 @@ def _read_full(path: str, ext: str) -> pd.DataFrame:
 def _quick_shape(path: str, ext: str) -> Tuple[Optional[int], Optional[int]]:
     try:
         if ext == ".csv":
-            # columns from header; rows by line count - 1
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 header = f.readline()
             cols = len(pd.read_csv(io.StringIO(header), nrows=0).columns) if header else 0
@@ -131,7 +130,6 @@ def _quick_shape(path: str, ext: str) -> Tuple[Optional[int], Optional[int]]:
             return rows, cols
     except Exception:
         pass
-    # fallback
     try:
         df = _read_full(path, ext)
         return df.shape[0], df.shape[1]
@@ -179,7 +177,7 @@ st.subheader("Upload files (CSV/XLSX)")
 
 uploads = st.file_uploader(
     "Choose one or more files",
-    type=["csv", "xlsx"],            # allow XLSX upload; read/write guarded later
+    type=["csv", "xlsx"],
     accept_multiple_files=True,
     key="uploader_files",
 )
@@ -197,7 +195,7 @@ if save_uploads and uploads:
             buf = bytes(uf.getbuffer())
             h = _file_md5_bytes(buf)
             if h in st.session_state["_uploaded_hashes"]:
-                continue  # same payload already saved this session
+                continue
             safe = _safe_filename(uf.name)
             dest = os.path.join(DATA_DIR, safe)
             if os.path.exists(dest):
@@ -226,37 +224,35 @@ files = _list_files()
 if not files:
     st.info("No files found yet. Upload and click 'Save uploaded files'.")
 else:
-    # --- Delete ALL controls at the top (always visible when files exist) ---
-    dcol1, dcol2, dcol3 = st.columns([1, 2, 4])
-    with dcol1:
-        if st.button("Delete ALL files", type="secondary"):
-            st.session_state["_delete_all_armed"] = True
-    with dcol2:
-        if st.session_state["_delete_all_armed"]:
-            st.warning("Type **DELETE ALL** to confirm deletion of every file in the data/ folder.")
-            confirm = st.text_input("Confirmation text", key="__confirm_delete_all")
-            ccf1, ccf2 = st.columns(2)
-            with ccf1:
-                if st.button("Confirm full delete"):
-                    if (confirm or "").strip().upper() == "DELETE ALL":
-                        errs = 0
-                        for fn in list(os.listdir(DATA_DIR)):
-                            fp = os.path.join(DATA_DIR, fn)
-                            if os.path.isfile(fp):
-                                try:
-                                    os.remove(fp)
-                                except Exception:
-                                    errs += 1
-                        st.session_state["_delete_all_armed"] = False
-                        if errs == 0:
-                            st.success("All files deleted.")
-                        else:
-                            st.error("Some files could not be deleted.")
-                    else:
-                        st.error("Confirmation text did not match.")
-            with ccf2:
-                if st.button("Cancel"):
+    # --- Delete ALL controls ---
+    if st.button("Delete ALL files", type="secondary"):
+        st.session_state["_delete_all_armed"] = True
+
+    if st.session_state["_delete_all_armed"]:
+        st.warning("Type **DELETE ALL** to confirm deletion of every file in the data/ folder.")
+        confirm = st.text_input("Confirmation text", key="__confirm_delete_all")
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            if st.button("Confirm full delete"):
+                if (confirm or "").strip().upper() == "DELETE ALL":
+                    errs = 0
+                    for fn in list(os.listdir(DATA_DIR)):
+                        fp = os.path.join(DATA_DIR, fn)
+                        if os.path.isfile(fp):
+                            try:
+                                os.remove(fp)
+                            except Exception:
+                                errs += 1
                     st.session_state["_delete_all_armed"] = False
+                    if errs == 0:
+                        st.success("All files deleted.")
+                    else:
+                        st.error("Some files could not be deleted.")
+                else:
+                    st.error("Confirmation text did not match.")
+        with cc2:
+            if st.button("Cancel"):
+                st.session_state["_delete_all_armed"] = False
 
     # Build metadata with rows/cols
     meta_rows: List[Dict[str, str]] = []
@@ -283,23 +279,38 @@ else:
     h7.markdown("**Delete**")
 
     # Scroll if more than 5 files
-    container_height = 320 if len(meta_rows) > 5 else None
-    with st.container(height=container_height):
-        for row in meta_rows:
-            c1, c2, c3, c4, c5, c6, c7 = st.columns([3, 1, 1, 2, 1, 1, 1])
-            c1.write(row["name"])
-            c2.write(row["type"])
-            c3.write(row["size"])
-            c4.write(row["modified"])
-            c5.write(row["rows"])
-            c6.write(row["cols"])
-            # per-row delete
-            if c7.button("Delete", key=f"del_{row['name']}"):
-                try:
-                    os.remove(row["path"])
-                    st.success(f"Deleted: {row['name']}")
-                except Exception as e:
-                    st.error(f"Could not delete {row['name']}: {e}")
+    if len(meta_rows) > 5:
+        with st.container(height=320):
+            for row in meta_rows:
+                c1, c2, c3, c4, c5, c6, c7 = st.columns([3, 1, 1, 2, 1, 1, 1])
+                c1.write(row["name"])
+                c2.write(row["type"])
+                c3.write(row["size"])
+                c4.write(row["modified"])
+                c5.write(row["rows"])
+                c6.write(row["cols"])
+                if c7.button("Delete", key=f"del_{row['name']}"):
+                    try:
+                        os.remove(row["path"])
+                        st.success(f"Deleted: {row['name']}")
+                    except Exception as e:
+                        st.error(f"Could not delete {row['name']}: {e}")
+    else:
+        with st.container():
+            for row in meta_rows:
+                c1, c2, c3, c4, c5, c6, c7 = st.columns([3, 1, 1, 2, 1, 1, 1])
+                c1.write(row["name"])
+                c2.write(row["type"])
+                c3.write(row["size"])
+                c4.write(row["modified"])
+                c5.write(row["rows"])
+                c6.write(row["cols"])
+                if c7.button("Delete", key=f"del_{row['name']}"):
+                    try:
+                        os.remove(row["path"])
+                        st.success(f"Deleted: {row['name']}")
+                    except Exception as e:
+                        st.error(f"Could not delete {row['name']}: {e}")
 
 st.divider()
 
@@ -318,7 +329,6 @@ else:
         ext = os.path.splitext(sel["name"])[1].lower()
         path = sel["path"]
 
-        # Preview top 100 (10 rows visible ~ about 360px height)
         try:
             preview_df = _read_preview(path, ext, nrows=100)
             st.markdown("**Preview (top 100 rows)**")
@@ -326,7 +336,6 @@ else:
         except Exception as e:
             st.error(f"Preview failed: {e}")
 
-        # Full read for summary & imputation
         df = None
         try:
             df = _read_full(path, ext)
@@ -376,7 +385,6 @@ else:
             if do_save:
                 try:
                     out = df.copy()
-                    # Apply per-column imputations
                     for _, r in edited.iterrows():
                         col = r["Column"]
                         method = r["Imputation"]
