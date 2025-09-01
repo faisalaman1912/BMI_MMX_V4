@@ -168,15 +168,22 @@ with st.expander("Value Counts"):
 st.subheader("Visualizations")
 
 chart = st.selectbox("Chart Type", ["Histogram", "Boxplot", "Scatter", "Correlation Heatmap"])
+
 if chart == "Histogram":
     col = st.selectbox("Column", df.columns)
-    fig = px.histogram(df, x=col)
+    if pd.api.types.is_numeric_dtype(df[col]):
+        fig = px.histogram(df, x=col)
+    else:
+        fig = px.histogram(df, x=col)  # acts as countplot for categories
     st.plotly_chart(fig, use_container_width=True)
 
 elif chart == "Boxplot":
     col = st.selectbox("Column", df.columns)
-    fig = px.box(df, y=col)
-    st.plotly_chart(fig, use_container_width=True)
+    if pd.api.types.is_numeric_dtype(df[col]):
+        fig = px.box(df, y=col)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("Boxplot is only meaningful for numeric columns.")
 
 elif chart == "Scatter":
     x = st.selectbox("X-axis", df.columns)
