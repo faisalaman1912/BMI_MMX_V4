@@ -172,15 +172,18 @@ if chart == "Histogram":
     col = st.selectbox("Column", df.columns)
     fig = px.histogram(df, x=col)
     st.plotly_chart(fig, use_container_width=True)
+
 elif chart == "Boxplot":
     col = st.selectbox("Column", df.columns)
     fig = px.box(df, y=col)
     st.plotly_chart(fig, use_container_width=True)
+
 elif chart == "Scatter":
     x = st.selectbox("X-axis", df.columns)
     y = st.selectbox("Y-axis", df.columns)
     fig = px.scatter(df, x=x, y=y)
     st.plotly_chart(fig, use_container_width=True)
+
 elif chart == "Correlation Heatmap":
     corr = df.corr(numeric_only=True)
     fig = ff.create_annotated_heatmap(
@@ -188,7 +191,8 @@ elif chart == "Correlation Heatmap":
         x=list(corr.columns),
         y=list(corr.index),
         annotation_text=corr.round(2).values,
-        colorscale="Viridis"
+        colorscale="Viridis",
+        showscale=True
     )
     st.plotly_chart(fig, use_container_width=True)
 
