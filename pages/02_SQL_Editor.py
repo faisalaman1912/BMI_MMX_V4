@@ -1,11 +1,9 @@
 # pages/02_SQL_Editor.py
 # -----------------------------------------------------------------------------
-# Streamlit page: SQL Editor
-# - Auto-discovers datasets (CSV/Parquet/XLSX) from a chosen "saved" folder
-# - Registers each dataset as a SQL table (DuckDB if available; fallback SQLite)
-# - Shows table catalog and column names
-# - SQL editor to query/join and create derived tables
-# - Save results to CSV/Parquet and download
+# SQL Editor for local datasets
+# - Discovers datasets under a chosen folder (defaults to data/curated)
+# - Registers each file as a SQL table (DuckDB if available; fallback SQLite)
+# - Table catalog, column browser, SQL runner, save & download results
 # -----------------------------------------------------------------------------
 
 import os
@@ -18,7 +16,7 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
-# Try DuckDB first; fallback to SQLite
+# Prefer DuckDB; fallback to SQLite if not installed
 _ENGINE = "duckdb"
 try:
     import duckdb  # type: ignore
@@ -33,14 +31,18 @@ st.set_page_config(page_title="SQL Editor", layout="wide")
 def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
+def default_data_root() -> str:
+    """Single source of truth for the app's data root."""
+    return os.environ.get("SAVED_DATA_DIR", "data/curated")
+
 def find_base_dir_candidates() -> List[str]:
     env_path = os.environ.get("SAVED_DATA_DIR", "").strip()
-    cands = []
+    cands: List[str] = []
     if env_path:
         cands.append(env_path)
     cands.extend([
+        "./data/curated",         # <- prefer curated
         "./saved_datasets",
-        "./data/curated",
         "./data/saved",
         "./datasets",
         "./data",
@@ -49,11 +51,11 @@ def find_base_dir_candidates() -> List[str]:
 
 @st.cache_data(show_spinner=False)
 def list_dataset_files(folder: str, include_subfolders: bool = True) -> List[str]:
-    """Return dataset file paths (csv / parquet / xlsx)."""
+    """Return dataset file paths (csv / parquet / xlsx) under a folder."""
     if not os.path.isdir(folder):
         return []
     exts = (".csv", ".parquet", ".xlsx")
-    out = []
+    out: List[str] = []
     if include_subfolders:
         for root, _dirs, files in os.walk(folder):
             for f in files:
@@ -67,30 +69,12 @@ def list_dataset_files(folder: str, include_subfolders: bool = True) -> List[str
     return out
 
 def _safe_table_name(path: str) -> str:
-    """Create a SQL-safe table name from filename."""
+    """Create a SQL-safe table name from filename (lowercase, [a-z0-9_])."""
     base = os.path.splitext(os.path.basename(path))[0]
-    # Replace non-alnum with underscores, and ensure it starts with a letter
     name = re.sub(r"[^A-Za-z0-9_]", "_", base)
     if not re.match(r"^[A-Za-z_]", name):
         name = "t_" + name
     return name.lower()
-
-@st.cache_data(show_spinner=False)
-def peek_columns_from_file(path: str, sheet: Optional[str] = None, max_rows: int = 2000) -> List[str]:
-    """Read a small chunk just to infer column names robustly."""
-    low = path.lower()
-    try:
-        if low.endswith(".csv"):
-            df = pd.read_csv(path, nrows=max_rows)
-        elif low.endswith(".parquet"):
-            df = pd.read_parquet(path)
-        elif low.endswith(".xlsx"):
-            df = pd.read_excel(path, sheet_name=sheet, nrows=max_rows)
-        else:
-            return []
-        return list(df.columns)
-    except Exception:
-        return []
 
 @st.cache_data(show_spinner=False)
 def excel_sheet_names(path: str) -> List[str]:
@@ -104,17 +88,15 @@ def read_full_dataframe(path: str, sheet: Optional[str]) -> pd.DataFrame:
     low = path.lower()
     if low.endswith(".csv"):
         return pd.read_csv(path)
-    elif low.endswith(".parquet"):
-        # Parquet requires pyarrow or fastparquet; if not present, show a clear error
+    if low.endswith(".parquet"):
         try:
             return pd.read_parquet(path)
         except Exception as e:
             st.error(f"Failed to read Parquet: {e}")
             raise
-    elif low.endswith(".xlsx"):
+    if low.endswith(".xlsx"):
         return pd.read_excel(path, sheet_name=sheet)
-    else:
-        raise ValueError("Unsupported file: " + path)
+    raise ValueError("Unsupported file: " + path)
 
 def register_tables_from_files(
     files: List[str],
@@ -122,13 +104,13 @@ def register_tables_from_files(
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, str]]:
     """
     Load all datasets to pandas DataFrames and return:
-    - table_name -> DataFrame
-    - table_name -> source path
+      - table_name -> DataFrame
+      - table_name -> source path
     """
     table_dfs: Dict[str, pd.DataFrame] = {}
     table_src: Dict[str, str] = {}
-
     name_counts: Dict[str, int] = {}
+
     for p in files:
         tname = _safe_table_name(p)
         # disambiguate duplicates
@@ -147,7 +129,6 @@ def register_tables_from_files(
 def run_sql_duckdb(query: str, tables: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     con = duckdb.connect()
     try:
-        # Register all DataFrames as DuckDB views
         for name, df in tables.items():
             con.register(name, df)
         return con.execute(query).df()
@@ -155,21 +136,16 @@ def run_sql_duckdb(query: str, tables: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         con.close()
 
 def run_sql_sqlite(query: str, tables: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-    # In-memory DB
     con = sqlite3.connect(":memory:")
     try:
         for name, df in tables.items():
-            # Best-effort dtype handling; SQLite will coerce flexibly
             df.to_sql(name, con, index=False, if_exists="replace")
         return pd.read_sql_query(query, con)
     finally:
         con.close()
 
 def run_sql(query: str, tables: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-    if _ENGINE == "duckdb":
-        return run_sql_duckdb(query, tables)
-    else:
-        return run_sql_sqlite(query, tables)
+    return run_sql_duckdb(query, tables) if _ENGINE == "duckdb" else run_sql_sqlite(query, tables)
 
 def suggest_select_star(table: str, limit: int = 100) -> str:
     return f"SELECT * FROM {table} LIMIT {limit};"
@@ -194,15 +170,19 @@ st.caption(
 
 st.sidebar.header("Datasets")
 
-# Select base folder
-default_base_dir = None
-for c in find_base_dir_candidates():
-    if os.path.isdir(c):
-        default_base_dir = c
-        break
+# Prefer ./data/curated (or SAVED_DATA_DIR), else fallback to first existing candidate
+preferred = default_data_root()
+if os.path.isdir(preferred):
+    default_base_dir = preferred
+else:
+    default_base_dir = None
+    for c in find_base_dir_candidates():
+        if os.path.isdir(c):
+            default_base_dir = c
+            break
 if default_base_dir is None:
-    default_base_dir = "./saved_datasets"
-    ensure_dir(default_base_dir)
+    default_base_dir = preferred  # create if missing
+ensure_dir(default_base_dir)
 
 base_dir = st.sidebar.text_input(
     "Saved data root folder",
@@ -212,11 +192,18 @@ base_dir = st.sidebar.text_input(
 
 include_subfolders = st.sidebar.checkbox("Include subfolders", value=True)
 
-files = list_dataset_files(base_dir, include_subfolders=include_subfolders)
+# Gather files from the chosen folder...
+files_primary = list_dataset_files(base_dir, include_subfolders=include_subfolders)
+# ...and also ensure data/curated is included (de-duped)
+curated_root = default_data_root()
+files_curated = list_dataset_files(curated_root, include_subfolders=include_subfolders) if os.path.isdir(curated_root) else []
+# Merge & de-duplicate (preserve order)
+files = list(dict.fromkeys(files_primary + files_curated))
+
 if not files:
     st.warning(
-        f"No datasets found in: `{os.path.relpath(base_dir)}`. "
-        "Place **CSV, Parquet, or Excel (.xlsx)** files here "
+        f"No datasets found in: `{os.path.relpath(base_dir)}` or `{os.path.relpath(curated_root)}`. "
+        "Place **CSV, Parquet, or Excel (.xlsx)** files there "
         f"{'(including subfolders)' if include_subfolders else ''}."
     )
     st.stop()
@@ -280,7 +267,7 @@ with left:
             if st.button("SELECT *", key="btn_select_star"):
                 st.session_state["sql"] = suggest_select_star(selected_table)
         with c2:
-            # Try to show a join suggestion if there is another table
+            # Show a join suggestion if there is another table
             other = [t for t in table_names if t != selected_table]
             if other and st.button("JOIN example", key="btn_join_example"):
                 st.session_state["sql"] = suggest_join_example(selected_table, other[0])
@@ -289,7 +276,7 @@ with right:
     st.subheader("SQL Editor")
     default_sql = st.session_state.get("sql") or (
         "/* Example\n"
-        f"{suggest_select_star(table_names[0])}\n"
+        f"{suggest_select_star(sorted(tables_df.keys())[0])}\n"
         "*/"
     )
     sql = st.text_area(
@@ -319,16 +306,17 @@ with right:
             base_name = f"sql_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             out_name = st.text_input("Base filename (no extension)", value=base_name)
 
-            # Save to selected folder
+            # Save to a chosen folder (default to curated)
+            default_target = curated_root if os.path.isdir(curated_root) else (os.path.dirname(files[0]) if files else base_dir)
             target_folder = st.text_input(
                 "Save to folder",
-                value=os.path.dirname(files[0]) if files else base_dir,
+                value=default_target,
                 help="Choose any existing folder. Files saved as both CSV & Parquet."
             )
             ensure_dir(target_folder)
 
-            # Save buttons
-            c1, c2, c3 = st.columns([1,1,1])
+            c1, c2, c3 = st.columns([1, 1, 1])
+
             with c1:
                 if st.button("Save to CSV"):
                     csv_path = os.path.join(target_folder, out_name + ".csv")
@@ -352,7 +340,7 @@ with right:
                         st.error("Parquet requires `pyarrow` or `fastparquet` installed.")
 
             with c3:
-                # On-the-fly downloads (no disk write)
+                # Downloads (no disk write)
                 csv_bytes = df_out.to_csv(index=False).encode("utf-8")
                 st.download_button(
                     "Download CSV",
@@ -361,7 +349,6 @@ with right:
                     mime="text/csv",
                 )
 
-                # Excel download (no dependency beyond pandas openpyxl if present)
                 buf = io.BytesIO()
                 try:
                     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
@@ -373,7 +360,7 @@ with right:
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     )
                 except Exception:
-                    # Fallback to CSV only if Excel writer unavailable
+                    # If xlsxwriter/openpyxl not available, just skip Excel download
                     pass
 
             # Optional: update manifest in folder to help other pages discover this result
