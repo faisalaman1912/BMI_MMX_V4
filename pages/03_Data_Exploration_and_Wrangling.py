@@ -8,7 +8,7 @@ import plotly.express as px
 # ------------------------------- #
 # Paths
 # ------------------------------- #
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 STORAGE_DIR = os.path.join(BASE_DIR, "storage")
 DATASETS_DIR = os.path.join(STORAGE_DIR, "datasets")
 
@@ -129,7 +129,7 @@ elif col_ops == "Create New Column":
     formula = st.text_area("Enter a formula using pandas syntax (e.g., `df['A'] + df['B']`)")
     if st.button("Create Column"):
         try:
-            df[new_col_name] = eval(formula)
+            df[new_col_name] = pd.eval(formula)
             st.success(f"Created column {new_col_name}")
         except Exception as e:
             st.error(f"Error: {e}")
