@@ -49,9 +49,40 @@ def find_base_dir_candidates() -> List[str]:
     ])
     return cands
 
+def latest_tree_mtime(path: str, include_subfolders: bool = True) -> float:
+    """Return latest modification time for any file under path (used to bust cache)."""
+    if not os.path.isdir(path):
+        return 0.0
+    latest = 0.0
+    try:
+        if include_subfolders:
+            for root, _dirs, files in os.walk(path):
+                for f in files:
+                    fp = os.path.join(root, f)
+                    try:
+                        m = os.path.getmtime(fp)
+                        if m > latest:
+                            latest = m
+                    except Exception:
+                        pass
+        else:
+            for f in os.listdir(path):
+                fp = os.path.join(path, f)
+                if os.path.isfile(fp):
+                    try:
+                        m = os.path.getmtime(fp)
+                        if m > latest:
+                            latest = m
+                    except Exception:
+                        pass
+    except Exception:
+        return 0.0
+    return latest
+
 @st.cache_data(show_spinner=False)
-def list_dataset_files(folder: str, include_subfolders: bool = True) -> List[str]:
-    """Return dataset file paths (csv / parquet / xlsx) under a folder."""
+def list_dataset_files(folder: str, include_subfolders: bool = True, cache_token: Optional[float] = None) -> List[str]:
+    """Return dataset file paths (csv / parquet / xlsx) under a folder.
+    cache_token is only used to invalidate the cache when the folder changes."""
     if not os.path.isdir(folder):
         return []
     exts = (".csv", ".parquet", ".xlsx")
@@ -192,11 +223,15 @@ base_dir = st.sidebar.text_input(
 
 include_subfolders = st.sidebar.checkbox("Include subfolders", value=True)
 
-# Gather files from the chosen folder...
-files_primary = list_dataset_files(base_dir, include_subfolders=include_subfolders)
-# ...and also ensure data/curated is included (de-duped)
+# Gather files from the chosen folder with cache-busting...
+primary_token = latest_tree_mtime(base_dir, include_subfolders=include_subfolders)
+files_primary = list_dataset_files(base_dir, include_subfolders=include_subfolders, cache_token=primary_token)
+
+# ...and also ensure data/curated is included (de-duped) with its own cache-buster
 curated_root = default_data_root()
-files_curated = list_dataset_files(curated_root, include_subfolders=include_subfolders) if os.path.isdir(curated_root) else []
+curated_token = latest_tree_mtime(curated_root, include_subfolders=include_subfolders) if os.path.isdir(curated_root) else 0.0
+files_curated = list_dataset_files(curated_root, include_subfolders=include_subfolders, cache_token=curated_token) if os.path.isdir(curated_root) else []
+
 # Merge & de-duplicate (preserve order)
 files = list(dict.fromkeys(files_primary + files_curated))
 
@@ -315,15 +350,27 @@ with right:
             )
             ensure_dir(target_folder)
 
-            c1, c2, c3 = st.columns([1, 1, 1])
+            c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
 
+            # (NEW) Save as table directly into curated folder (CSV)
             with c1:
+                if st.button("Save as table (curated CSV)"):
+                    safe_base = re.sub(r"[^A-Za-z0-9_-]+", "_", out_name).strip("_-") or "sql_result"
+                    curated_folder = default_data_root()
+                    ensure_dir(curated_folder)
+                    csv_path = os.path.join(curated_folder, safe_base + ".csv")
+                    df_out.to_csv(csv_path, index=False)
+                    st.success(f"Saved table → `{os.path.relpath(csv_path)}`")
+                    # Nudge cache to pick up the new table next rerun
+                    st.experimental_rerun()
+
+            with c2:
                 if st.button("Save to CSV"):
                     csv_path = os.path.join(target_folder, out_name + ".csv")
                     df_out.to_csv(csv_path, index=False)
                     st.success(f"Saved CSV → `{os.path.relpath(csv_path)}`")
 
-            with c2:
+            with c3:
                 # Parquet save (if pyarrow/fastparquet available)
                 try:
                     import pyarrow  # noqa: F401
@@ -339,7 +386,7 @@ with right:
                     else:
                         st.error("Parquet requires `pyarrow` or `fastparquet` installed.")
 
-            with c3:
+            with c4:
                 # Downloads (no disk write)
                 csv_bytes = df_out.to_csv(index=False).encode("utf-8")
                 st.download_button(
@@ -399,6 +446,6 @@ with st.expander("Tips", expanded=False):
   - DuckDB (preferred): better SQL features, Parquet native support, fast joins.
   - SQLite (fallback): widely available; works well for CSV/XLSX.
 - **Snippets**: Use the buttons on the left to paste a `SELECT *` or a sample `JOIN`.
-- **Save**: You can save results to disk (CSV/Parquet) or download (CSV/Excel).
+- **Save**: Save result back into the curated folder as a new table (CSV), or download as Excel.
         """
     )
