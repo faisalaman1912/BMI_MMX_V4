@@ -1,48 +1,56 @@
-
-import time
+# Home.py
+import os
 import pandas as pd
 import streamlit as st
-from utils.catalog import recent_files, recent_models
 
-st.set_page_config(page_title="Home | BMI MMX V1", page_icon="🏠", layout="wide")
+DATA_DIR = os.environ.get("SAVED_DATA_DIR", "data/curated")
+os.makedirs(DATA_DIR, exist_ok=True)
 
-st.markdown(
-    """
-    <div style="background-color:#f8f6f2;border-radius:16px;padding:24px;margin-bottom:18px;text-align:center;border:1px solid #eee;">
-      <h2 style="margin:0;font-weight:600;">Marketing Mix Modelling by BlueMatter</h2>
-    </div>
-    """, unsafe_allow_html=True,
-)
+st.set_page_config(page_title="Home", layout="wide")
+st.title("🏠 Home")
 
-left, right = st.columns(2)
+st.caption(f"All modules read/write from **{DATA_DIR}**. Set env `SAVED_DATA_DIR` to override.")
 
-with left:
-    st.subheader("📁 Recent Uploaded Files")
-    files = recent_files(5)
-    if not files:
-        st.info("No files found. Drop CSV/XLSX into ./storage/datasets to see them here.")
-    else:
-        rows = []
-        for f in files:
-            rows.append({
-                "Name": f.get("name"),
-                "Type": f.get("type"),
-                "Size (KB)": round((f.get("size", 0) or 0)/1024, 2),
-                "Modified": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(f.get("modified_ts", 0) or 0)),
-            })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, height=260)
+# List files
+exts = (".csv", ".xlsx", ".parquet")
+files = []
+for root, _, names in os.walk(DATA_DIR):
+    for n in names:
+        if n.lower().endswith(exts):
+            files.append(os.path.join(root, n))
+files.sort()
 
-with right:
-    st.subheader("🧠 Latest Saved Models")
-    models = recent_models(5)
-    if not models:
-        st.info("No models found. Place model JSON artifacts in ./storage/models.")
-    else:
-        rows = []
-        for m in models:
-            rows.append({
-                "Model": m.get("model_name") or m.get("name"),
-                "Algo": m.get("algo"),
-                "Saved At": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(m.get("ts", m.get("modified_ts", 0)))),
-            })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, height=260)
+if not files:
+    st.info(f"No datasets found in `{DATA_DIR}` yet. Go to **Ingestion & Curation** to upload.")
+else:
+    sel = st.selectbox("Select a dataset", files, index=0)
+    low = sel.lower()
+
+    if low.endswith(".csv"):
+        df_head = pd.read_csv(sel, nrows=2000)
+        st.write("**Columns:**")
+        st.code(", ".join(map(str, df_head.columns)))
+        with st.expander("Preview (top 15 rows)"):
+            st.dataframe(df_head.head(15), use_container_width=True)
+
+    elif low.endswith(".parquet"):
+        try:
+            df_head = pd.read_parquet(sel)
+            st.write("**Columns:**")
+            st.code(", ".join(map(str, df_head.columns)))
+            with st.expander("Preview (top 15 rows)"):
+                st.dataframe(df_head.head(15), use_container_width=True)
+        except Exception as e:
+            st.error(f"Parquet preview failed: {e}")
+
+    else:  # .xlsx
+        try:
+            xl = pd.ExcelFile(sel)
+            sheet = st.selectbox("Sheet", xl.sheet_names, index=0)
+            df_head = xl.parse(sheet, nrows=2000)
+            st.write("**Columns:**")
+            st.code(", ".join(map(str, df_head.columns)))
+            with st.expander("Preview (top 15 rows)"):
+                st.dataframe(df_head.head(15), use_container_width=True)
+        except Exception as e:
+            st.error(f"Excel preview failed: {e}")
